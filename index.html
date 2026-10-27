@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Кузница</title>
+<!-- Библиотека Telegram: даёт доступ к теме, вибрации и облачному сохранению -->
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+  /* Цвета берутся из темы Telegram, а если игра открыта в браузере — из запасных значений */
+  :root {
+    --bg: var(--tg-theme-bg-color, #12121a);
+    --text: var(--tg-theme-text-color, #f2f2f5);
+    --hint: var(--tg-theme-hint-color, #8a8a99);
+    --card: var(--tg-theme-secondary-bg-color, #1f1f2c);
+    --accent: var(--tg-theme-button-color, #f5a524);
+    --accent-text: var(--tg-theme-button-text-color, #111111);
+    --good: #2ecc71;
+    --bad: #e74c3c;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { background: var(--bg); color: var(--text); font-family: -apple-system, system-ui, sans-serif;
+         padding: 16px; max-width: 480px; margin: 0 auto; user-select: none; }
+  header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+  h1 { font-size: 20px; }
+  .coins { background: var(--card); padding: 6px 12px; border-radius: 20px; font-weight: 600; }
+  .row { display: flex; gap: 10px; margin-bottom: 8px; }
+  .slot { flex: 1; background: var(--card); border-radius: 14px; padding: 12px; text-align: center; }
+  .slot .label { font-size: 12px; color: var(--hint); }
+  .slot .icon { font-size: 36px; margin: 4px 0; }
+  .slot .name { font-weight: 600; font-size: 14px; }
+  .slot .val { font-size: 12px; color: var(--hint); }
+  .arrow { align-self: center; font-size: 22px; color: var(--hint); }
+  canvas { display: block; margin: 4px auto; width: 240px; height: 240px; }
+  .chance { text-align: center; color: var(--hint); font-size: 14px; }
+  .msg { text-align: center; min-height: 24px; margin: 8px 0; font-weight: 700; }
+  .msg.good { color: var(--good); }
+  .msg.bad { color: var(--bad); }
+  button.main { width: 100%; padding: 16px; border: none; border-radius: 14px; background: var(--accent);
+                color: var(--accent-text); font-size: 18px; font-weight: 700; }
+  button.main:disabled { opacity: .4; }
+  .targets { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 14px; }
+  .t { background: var(--card); border: 2px solid transparent; border-radius: 12px; padding: 8px 4px;
+       text-align: center; font-size: 12px; color: var(--text); }
+  .t.sel { border-color: var(--accent); }
+  .t:disabled { opacity: .3; }
+  .t .i { font-size: 24px; display: block; }
+  .shop { margin-top: 14px; text-align: center; font-size: 13px; color: var(--hint); }
+  .shop button { margin: 6px 4px 0; padding: 10px 14px; border-radius: 10px; border: none;
+                 background: var(--card); color: var(--text); font-size: 14px; }
+</style>
+</head>
+<body>
+  <header>
+    <h1>⚒️ Кузница</h1>
+    <div class="coins">🪙 <span id="coins">0</span></div>
+  </header>
+
+  <div class="row">
+    <div class="slot">
+      <div class="label">У тебя</div>
+      <div class="icon" id="curIcon"></div>
+      <div class="name" id="curName"></div>
+      <div class="val" id="curVal"></div>
+    </div>
+    <div class="arrow">➜</div>
+    <div class="slot">
+      <div class="label">Цель</div>
+      <div class="icon" id="tgtIcon">❔</div>
+      <div class="name" id="tgtName">Выбери ниже</div>
+      <div class="val" id="tgtVal"></div>
+    </div>
+  </div>
+
+  <canvas id="wheel" width="480" height="480"></canvas>
+  <div class="chance" id="chance"></div>
+  <div class="msg" id="msg"></div>
+  <button class="main" id="btn">Выбери цель</button>
+  <div class="targets" id="targets"></div>
+  <div class="shop" id="shop"></div>
+
+<script>
+// ===== 1. ПРЕДМЕТЫ ИГРЫ =====
+// Можешь менять названия, эмодзи и ценность — игра подстроится сама.
+const ITEMS = [
+  { name: 'Ржавый нож',       icon: '🔪', value: 10 },
+  { name: 'Бронзовый меч',    icon: '🗡️', value: 25 },
+  { name: 'Стальной щит',     icon: '🛡️', value: 60 },
+  { name: 'Лук эльфа',        icon: '🏹', value: 150 },
+  { name: 'Магический посох', icon: '🪄', value: 400 },
+  { name: 'Корона короля',    icon: '👑', value: 1000 },
+  { name: 'Яйцо дракона',     icon: '🥚', value: 2500 },
+  { name: 'Дракон',           icon: '🐉', value: 6000 },
+  { name: 'Звезда',           icon: '🌟', value: 15000 },
+];
+
+// ===== 2. TELEGRAM =====
+const tg = window.Telegram ? window.Telegram.WebApp : null;
+if (tg) { tg.ready(); tg.expand(); }
+const hasCloud = !!(tg && tg.CloudStorage && tg.isVersionAtLeast && tg.isVersionAtLeast('6.9'));
+
+function vibrate(type) {
+  try { if (tg && tg.HapticFeedback) tg.HapticFeedback.notificationOccurred(type); } catch (e) {}
+}
+
+// ===== 3. СОСТОЯНИЕ ИГРОКА =====
+let state = { item: 0, coins: 0, best: 0 }; // item = номер предмета в списке, null = предмета нет
+let target = null;      // какой предмет выбран целью
+let spinning = false;   // крутится ли стрелка
+let angle = 0;          // угол стрелки (в радианах)
+let speed = 0;          // скорость стрелки
+let zoneStart = 0, zoneSize = 0; // зелёная зона
+let lastTime = 0, raf = null;
+
+// Сохранение: в облако Telegram (если есть) и в браузер
+function save() {
+  const s = JSON.stringify(state);
+  try { localStorage.setItem('forge', s); } catch (e) {}
+  try { if (hasCloud) tg.CloudStorage.setItem('forge', s); } catch (e) {}
+}
+function applySaved(s) {
+  if (!s) return;
+  try { const o = JSON.parse(s); if (o && typeof o.coins === 'number') state = o; } catch (e) {}
+}
+function load(done) {
+  let local = null;
+  try { local = localStorage.getItem('forge'); } catch (e) {}
+  if (hasCloud) {
+    try {
+      tg.CloudStorage.getItem('forge', (err, v) => { applySaved(v || local); done(); });
+      return;
+    } catch (e) {}
+  }
+  applySaved(local); done();
+}
+
+// ===== 4. ПРАВИЛА =====
+const $ = id => document.getElementById(id);
+
+// Размер зелёной зоны = отношение ценностей (10 → 25 даёт ~38% круга)
+function zoneShare() {
+  return ITEMS[state.item].value / ITEMS[target].value * 0.95;
+}
+// Чем больше прыжок в цене, тем быстрее крутится стрелка
+function speedFor() {
+  const ratio = ITEMS[target].value / ITEMS[state.item].value;
+  return 2.5 * (1 + Math.log2(ratio) * 0.5);
+}
+
+// ===== 5. РИСОВАНИЕ КРУГА =====
+const cv = $('wheel'), ctx = cv.getContext('2d');
+const cssVar = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+function draw() {
+  const W = cv.width, c = W / 2, r = W / 2 - 30;
+  ctx.clearRect(0, 0, W, W);
+  // серое кольцо
+  ctx.lineWidth = 28; ctx.lineCap = 'butt';
+  ctx.strokeStyle = cssVar('--card');
+  ctx.beginPath(); ctx.arc(c, c, r, 0, Math.PI * 2); ctx.stroke();
+  // зелёная зона
+  if (target !== null && zoneSize > 0) {
+    ctx.strokeStyle = cssVar('--good');
+    ctx.beginPath(); ctx.arc(c, c, r, zoneStart, zoneStart + zoneSize); ctx.stroke();
+  }
+  // стрелка
+  ctx.strokeStyle = cssVar('--accent'); ctx.lineWidth = 8; ctx.lineCap = 'round';
+  ctx.beginPath(); ctx.moveTo(c, c);
+  ctx.lineTo(c + Math.cos(angle) * (r + 14), c + Math.sin(angle) * (r + 14)); ctx.stroke();
+  ctx.fillStyle = cssVar('--text');
+  ctx.beginPath(); ctx.arc(c, c, 14, 0, Math.PI * 2); ctx.fill();
+}
+
+// ===== 6. ИГРОВОЙ ЦИКЛ =====
+function startSpin() {
+  spinning = true;
+  zoneStart = Math.random() * Math.PI * 2;
+  angle = zoneStart + Math.PI;  // стрелка стартует напротив зоны
+  speed = speedFor();
+  $('msg').textContent = ''; $('msg').className = 'msg';
+  lastTime = performance.now();
+  render();
+  raf = requestAnimationFrame(loop);
+}
+
+function loop(now) {
+  const dt = (now - lastTime) / 1000;
+  lastTime = now;
+  angle += speed * dt;
+  draw();
+  raf = requestAnimationFrame(loop);
+}
+
+function stopSpin() {
+  cancelAnimationFrame(raf);
+  spinning = false;
+  const full = Math.PI * 2;
+  const rel = ((angle - zoneStart) % full + full) % full;
+  const win = rel <= zoneSize;
+  const m = $('msg');
+
+  if (win) {
+    state.item = target;
+    state.best = Math.max(state.best, target);
+    m.textContent = '🔥 Успех! Теперь у тебя ' + ITEMS[target].name;
+    m.className = 'msg good';
+    vibrate('success');
+  } else {
+    const shards = Math.floor(ITEMS[state.item].value * 0.2); // осколки = 20% ценности
+    m.textContent = '💥 Сломалось! Осколки: +' + shards + ' 🪙';
+    m.className = 'msg bad';
+    state.coins += shards;
+    state.item = null;
+    vibrate('error');
+  }
+  target = null; zoneSize = 0;
+  save(); draw(); render();
+}
+
+// ===== 7. ИНТЕРФЕЙС =====
+function selectTarget(i) {
+  if (spinning) return;
+  target = i;
+  zoneStart = Math.random() * Math.PI * 2;
+  zoneSize = Math.max(zoneShare() * Math.PI * 2, 0.1);
+  $('msg').textContent = ''; $('msg').className = 'msg';
+  draw(); render();
+}
+
+function buy(i) {
+  if (ITEMS[i].value > state.coins) return;
+  state.coins -= ITEMS[i].value;
+  state.item = i;
+  save(); render();
+}
+
+function freeKnife() {
+  state.item = 0;
+  save(); render();
+}
+
+function render() {
+  $('coins').textContent = state.coins;
+
+  const cur = state.item !== null ? ITEMS[state.item] : null;
+  $('curIcon').textContent = cur ? cur.icon : '∅';
+  $('curName').textContent = cur ? cur.name : 'Пусто';
+  $('curVal').textContent = cur ? cur.value + ' 🪙' : '';
+
+  const tgt = target !== null ? ITEMS[target] : null;
+  $('tgtIcon').textContent = tgt ? tgt.icon : '❔';
+  $('tgtName').textContent = tgt ? tgt.name : 'Выбери ниже';
+  $('tgtVal').textContent = tgt ? tgt.value + ' 🪙' : '';
+
+  $('chance').textContent = tgt
+    ? 'Зелёная зона: ' + Math.round(zoneShare() * 100) + '% круга'
+    : '';
+
+  const btn = $('btn');
+  btn.disabled = !(cur && tgt);
+  btn.textContent = spinning ? '⏹ СТОП!' : (tgt ? '▶ Ковать' : 'Выбери цель');
+
+  // список целей
+  const box = $('targets'); box.innerHTML = '';
+  ITEMS.forEach((it, i) => {
+    const b = document.createElement('button');
+    b.className = 't' + (i === target ? ' sel' : '');
+    b.disabled = spinning || !cur || i <= state.item;
+    b.innerHTML = '<span class="i">' + it.icon + '</span>' + it.name + '<br>' + it.value;
+    b.onclick = () => selectTarget(i);
+    box.appendChild(b);
+  });
+
+  // магазин (виден, только если предмета нет)
+  const shop = $('shop'); shop.innerHTML = '';
+  if (!cur) {
+    shop.append('Купи новый предмет за осколки:');
+    shop.appendChild(document.createElement('br'));
+    let any = false;
+    ITEMS.forEach((it, i) => {
+      if (it.value <= state.coins) {
+        any = true;
+        const b = document.createElement('button');
+        b.textContent = it.icon + ' ' + it.value + ' 🪙';
+        b.onclick = () => buy(i);
+        shop.appendChild(b);
+      }
+    });
+    if (!any) {
+      const b = document.createElement('button');
+      b.textContent = '🔪 Подобрать ржавый нож бесплатно';
+      b.onclick = freeKnife;
+      shop.appendChild(b);
+    }
+  }
+  if (state.best > 0) {
+    const p = document.createElement('div');
+    p.style.marginTop = '10px';
+    p.textContent = 'Рекорд: ' + ITEMS[state.best].icon + ' ' + ITEMS[state.best].name;
+    shop.appendChild(p);
+  }
+}
+
+$('btn').onclick = () => {
+  if (spinning) stopSpin();
+  else if (target !== null && state.item !== null) startSpin();
+};
+
+load(() => { draw(); render(); });
+</script>
+</body>
+</html>
